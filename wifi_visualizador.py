@@ -56,6 +56,21 @@ def hide_console() -> None:
             ctypes.windll.user32.ShowWindow(console, 0)
 
 
+def is_valid_adb_endpoint(endpoint: str) -> bool:
+    if not endpoint or any(character.isspace() for character in endpoint):
+        return False
+    host, separator, port_text = endpoint.rpartition(":")
+    if (
+        not separator
+        or not host
+        or not port_text.isascii()
+        or not port_text.isdecimal()
+    ):
+        return False
+    port = int(port_text)
+    return 1 <= port <= 65535
+
+
 WEB_PAGE = """<!doctype html>
 <html lang="es">
 <head>
@@ -127,6 +142,7 @@ class PhoneScreenViewer:
         self.device_results: queue.Queue[
             tuple[list[tuple[str, str]] | None, str | None]
         ] = queue.Queue()
+        self.wireless_results: queue.Queue[tuple[str, bool]] = queue.Queue()
         self.capture_messages: queue.Queue[str] = queue.Queue()
         self.frame_lock = threading.Lock()
         self.frame_condition = threading.Condition(self.frame_lock)
@@ -139,6 +155,7 @@ class PhoneScreenViewer:
         self.scrcpy_path = shutil.which("scrcpy")
         self.scrcpy_process: subprocess.Popen[bytes] | None = None
         self.device_refreshing = False
+        self.wireless_busy = False
         self.web_server: ThreadingHTTPServer | None = None
         self.photo: tk.PhotoImage | None = None
         self.rendered_sequence = -1
@@ -191,9 +208,40 @@ class PhoneScreenViewer:
         )
         self.web_button.pack(side="right")
 
+        wireless = ttk.LabelFrame(
+            frame, text="Depuración inalámbrica (Android 11+)", padding=(8, 6)
+        )
+        wireless.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        wireless.columnconfigure(1, weight=1)
+        ttk.Label(wireless, text="IP:puerto de emparejamiento:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6)
+        )
+        self.pairing_endpoint = ttk.Entry(wireless, width=24)
+        self.pairing_endpoint.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ttk.Label(wireless, text="Código:").grid(
+            row=0, column=2, sticky="w", padx=(0, 6)
+        )
+        self.pairing_code = ttk.Entry(wireless, width=10, show="*")
+        self.pairing_code.grid(row=0, column=3, sticky="ew", padx=(0, 8))
+        self.pair_button = ttk.Button(
+            wireless, text="Emparejar", command=self.pair_wireless_device
+        )
+        self.pair_button.grid(row=0, column=4)
+        ttk.Label(wireless, text="IP:puerto de conexión:").grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0)
+        )
+        self.connection_endpoint = ttk.Entry(wireless, width=24)
+        self.connection_endpoint.grid(
+            row=1, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(6, 0)
+        )
+        self.connect_button = ttk.Button(
+            wireless, text="Conectar", command=self.connect_wireless_device
+        )
+        self.connect_button.grid(row=1, column=4, pady=(6, 0))
+
         self.status = tk.StringVar(value="Buscando dispositivos Android...")
         ttk.Label(frame, textvariable=self.status).grid(
-            row=2, column=0, sticky="new", pady=(0, 8)
+            row=3, column=0, sticky="new", pady=(0, 8)
         )
 
         self.screen = tk.Canvas(
@@ -202,19 +250,19 @@ class PhoneScreenViewer:
             highlightthickness=1,
             highlightbackground="#39434d",
         )
-        self.screen.grid(row=3, column=0, sticky="nsew")
-        frame.rowconfigure(3, weight=1)
+        self.screen.grid(row=4, column=0, sticky="nsew")
+        frame.rowconfigure(4, weight=1)
         self.screen.bind("<Configure>", self._on_screen_resize)
 
         ttk.Label(
             frame,
             text=(
-                "Requiere Android, ADB instalado y Depuración por USB activada. "
-                "El visor web solo acepta conexiones desde esta PC."
+                "Requiere Android y ADB. Activa Depuración USB o inalámbrica; "
+                "el visor web solo acepta conexiones desde esta PC."
             ),
             foreground="#5c6773",
             wraplength=950,
-        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.placeholder_id = self.screen.create_text(
             20,
             20,
@@ -231,6 +279,97 @@ class PhoneScreenViewer:
         self.refresh_button.configure(state="disabled")
         self.status.set("Buscando dispositivos Android...")
         threading.Thread(target=self._device_worker, daemon=True).start()
+
+    def pair_wireless_device(self) -> None:
+        endpoint = self.pairing_endpoint.get().strip()
+        code = self.pairing_code.get().strip()
+        if not is_valid_adb_endpoint(endpoint):
+            messagebox.showwarning(
+                "Dirección no válida",
+                "Escribe la IP y el puerto de emparejamiento que muestra "
+                "Depuración inalámbrica.",
+                parent=self.root,
+            )
+            return
+        if not code.isascii() or not code.isdigit():
+            messagebox.showwarning(
+                "Código no válido",
+                "Escribe el código numérico que muestra el teléfono.",
+                parent=self.root,
+            )
+            return
+        self._start_wireless_command(
+            ["adb", "pair", endpoint, code], "Emparejamiento"
+        )
+
+    def connect_wireless_device(self) -> None:
+        endpoint = self.connection_endpoint.get().strip()
+        if not is_valid_adb_endpoint(endpoint):
+            messagebox.showwarning(
+                "Dirección no válida",
+                "Escribe la IP y el puerto de conexión que muestra "
+                "Depuración inalámbrica.",
+                parent=self.root,
+            )
+            return
+        self._start_wireless_command(
+            ["adb", "connect", endpoint], "Conexión", refresh_devices=True
+        )
+
+    def _start_wireless_command(
+        self, command: list[str], action: str, refresh_devices: bool = False
+    ) -> None:
+        if self.wireless_busy:
+            return
+        self.wireless_busy = True
+        self.pair_button.configure(state="disabled")
+        self.connect_button.configure(state="disabled")
+        self.status.set(f"{action} inalámbrico...")
+        threading.Thread(
+            target=self._wireless_worker,
+            args=(command, action, refresh_devices),
+            daemon=True,
+        ).start()
+
+    def _wireless_worker(
+        self, command: list[str], action: str, refresh_devices: bool
+    ) -> None:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            output = "\n".join(
+                part.strip() for part in (result.stdout, result.stderr) if part.strip()
+            )
+            output_lower = output.casefold()
+            if result.returncode or output_lower.startswith(
+                (
+                    "failed:",
+                    "failed to connect",
+                    "cannot connect",
+                    "unable to connect",
+                    "error:",
+                )
+            ):
+                detail = output or f"adb terminó con código {result.returncode}."
+                raise RuntimeError(detail)
+            if action == "Emparejamiento":
+                output = (
+                    f"{output or 'ADB informó éxito.'} "
+                    "Ahora introduce la IP:puerto de conexión del teléfono."
+                )
+            self.wireless_results.put(
+                (f"{action} completado: {output}", refresh_devices)
+            )
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            self.wireless_results.put((f"Error de {action.lower()}: {error}", False))
 
     def _device_worker(self) -> None:
         try:
@@ -290,9 +429,12 @@ class PhoneScreenViewer:
             self.start_button.configure(state="disabled")
             unauthorized = any(state == "unauthorized" for _, state in devices or [])
             self.status.set(
-                "Autoriza la depuración USB en el teléfono y vuelve a buscar."
+                "Autoriza la depuración USB o inalámbrica en el teléfono y vuelve a buscar."
                 if unauthorized
-                else "No hay dispositivos. Conecta el teléfono y activa Depuración por USB."
+                else (
+                    "No hay dispositivos. Conecta por USB o empareja y conecta "
+                    "el teléfono mediante Depuración inalámbrica."
+                )
             )
 
     def start_capture(self) -> None:
@@ -599,6 +741,18 @@ class PhoneScreenViewer:
 
     def _poll(self) -> None:
         self._apply_device_results()
+        while True:
+            try:
+                message, refresh_devices = self.wireless_results.get_nowait()
+            except queue.Empty:
+                break
+            self.wireless_busy = False
+            self.pair_button.configure(state="normal")
+            self.connect_button.configure(state="normal")
+            self.status.set(message)
+            if refresh_devices:
+                self.refresh_devices()
+
         while True:
             try:
                 message = self.capture_messages.get_nowait()

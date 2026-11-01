@@ -12,5 +12,13 @@ requisitos e informacion para usar le visualizador
 ⚠REQUISITOS IMPORTANTES⚠
 1 TENER ADB Y SCRCPY
 2 TERNER PYTHON 3.12 INSTALADO
-3 TENER DEPURACION USB ACTIVA
+3 ACTIVAR DEPURACION USB O DEPURACION INALAMBRICA
 
+DEPURACION INALAMBRICA (ANDROID 11 O SUPERIOR)
+1. Conecta el telefono y la PC a la misma red Wi-Fi.
+2. En las opciones de desarrollador del telefono, activa Depuracion inalambrica.
+3. En la aplicacion, introduce la IP y el puerto de emparejamiento, y el codigo
+   que muestra el telefono. Pulsa Emparejar.
+4. Introduce la IP y el puerto de conexion (es distinto al puerto de
+   emparejamiento) y pulsa Conectar.
+5. Selecciona el dispositivo encontrado y pulsa Iniciar.
