@@ -142,7 +142,7 @@ class PhoneScreenViewer:
         self.device_results: queue.Queue[
             tuple[list[tuple[str, str]] | None, str | None]
         ] = queue.Queue()
-        self.wireless_results: queue.Queue[tuple[str, bool]] = queue.Queue()
+        self.wireless_results: queue.Queue[tuple[str, bool, str | None]] = queue.Queue()
         self.capture_messages: queue.Queue[str] = queue.Queue()
         self.frame_lock = threading.Lock()
         self.frame_condition = threading.Condition(self.frame_lock)
@@ -213,7 +213,7 @@ class PhoneScreenViewer:
         )
         wireless.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         wireless.columnconfigure(1, weight=1)
-        ttk.Label(wireless, text="IP:puerto de emparejamiento:").grid(
+        ttk.Label(wireless, text="IP:puerto para vincular:").grid(
             row=0, column=0, sticky="w", padx=(0, 6)
         )
         self.pairing_endpoint = ttk.Entry(wireless, width=24)
@@ -223,11 +223,19 @@ class PhoneScreenViewer:
         )
         self.pairing_code = ttk.Entry(wireless, width=10, show="*")
         self.pairing_code.grid(row=0, column=3, sticky="ew", padx=(0, 8))
+        self.show_pairing_code = tk.BooleanVar(value=False)
+        self.show_code_button = ttk.Checkbutton(
+            wireless,
+            text="Mostrar",
+            variable=self.show_pairing_code,
+            command=self._toggle_pairing_code,
+        )
+        self.show_code_button.grid(row=0, column=4, padx=(0, 8))
         self.pair_button = ttk.Button(
             wireless, text="Emparejar", command=self.pair_wireless_device
         )
-        self.pair_button.grid(row=0, column=4)
-        ttk.Label(wireless, text="IP:puerto de conexión:").grid(
+        self.pair_button.grid(row=0, column=5)
+        ttk.Label(wireless, text="IP:puerto para conectar:").grid(
             row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0)
         )
         self.connection_endpoint = ttk.Entry(wireless, width=24)
@@ -237,7 +245,20 @@ class PhoneScreenViewer:
         self.connect_button = ttk.Button(
             wireless, text="Conectar", command=self.connect_wireless_device
         )
-        self.connect_button.grid(row=1, column=4, pady=(6, 0))
+        self.connect_button.grid(row=1, column=5, pady=(6, 0))
+        ttk.Label(
+            wireless,
+            text=(
+                "Pasos: conecta el teléfono y la PC a la misma Wi-Fi. En Android, "
+                "abre Ajustes > Opciones para desarrolladores > Depuración "
+                "inalámbrica > Vincular dispositivo con código. Usa aquí la "
+                "dirección y el código de vinculación; después, vuelve a la "
+                "pantalla de Depuración inalámbrica y usa el puerto de conexión "
+                "(es distinto)."
+            ),
+            wraplength=900,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         self.status = tk.StringVar(value="Buscando dispositivos Android...")
         ttk.Label(frame, textvariable=self.status).grid(
@@ -279,6 +300,11 @@ class PhoneScreenViewer:
         self.refresh_button.configure(state="disabled")
         self.status.set("Buscando dispositivos Android...")
         threading.Thread(target=self._device_worker, daemon=True).start()
+
+    def _toggle_pairing_code(self) -> None:
+        self.pairing_code.configure(
+            show="" if self.show_pairing_code.get() else "*"
+        )
 
     def pair_wireless_device(self) -> None:
         endpoint = self.pairing_endpoint.get().strip()
@@ -324,6 +350,10 @@ class PhoneScreenViewer:
         self.wireless_busy = True
         self.pair_button.configure(state="disabled")
         self.connect_button.configure(state="disabled")
+        self.show_code_button.configure(state="disabled")
+        self.pairing_endpoint.configure(state="disabled")
+        self.pairing_code.configure(state="disabled")
+        self.connection_endpoint.configure(state="disabled")
         self.status.set(f"{action} inalámbrico...")
         threading.Thread(
             target=self._wireless_worker,
@@ -363,13 +393,19 @@ class PhoneScreenViewer:
             if action == "Emparejamiento":
                 output = (
                     f"{output or 'ADB informó éxito.'} "
-                    "Ahora introduce la IP:puerto de conexión del teléfono."
+                    "Ahora introduce el puerto de conexión que aparece en la "
+                    "pantalla principal de Depuración inalámbrica."
                 )
+                connection_prefix = f"{command[2].rpartition(':')[0]}:"
+            else:
+                connection_prefix = None
             self.wireless_results.put(
-                (f"{action} completado: {output}", refresh_devices)
+                (f"{action} completado: {output}", refresh_devices, connection_prefix)
             )
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-            self.wireless_results.put((f"Error de {action.lower()}: {error}", False))
+            self.wireless_results.put(
+                (f"Error de {action.lower()}: {error}", False, None)
+            )
 
     def _device_worker(self) -> None:
         try:
@@ -743,12 +779,23 @@ class PhoneScreenViewer:
         self._apply_device_results()
         while True:
             try:
-                message, refresh_devices = self.wireless_results.get_nowait()
+                message, refresh_devices, connection_prefix = (
+                    self.wireless_results.get_nowait()
+                )
             except queue.Empty:
                 break
             self.wireless_busy = False
             self.pair_button.configure(state="normal")
             self.connect_button.configure(state="normal")
+            self.show_code_button.configure(state="normal")
+            self.pairing_endpoint.configure(state="normal")
+            self.pairing_code.configure(state="normal")
+            self.connection_endpoint.configure(state="normal")
+            if connection_prefix is not None:
+                self.pairing_code.delete(0, tk.END)
+                self.connection_endpoint.delete(0, tk.END)
+                self.connection_endpoint.insert(0, connection_prefix)
+                self.connection_endpoint.focus_set()
             self.status.set(message)
             if refresh_devices:
                 self.refresh_devices()
